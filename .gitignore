@@ -1,0 +1,28 @@
+# 登录态与配置：等同密码，绝不提交
+cookies.json
+config.json
+data/
+reports/
+.env
+.env.*
+*.local.json
+
+# 抓取到的内容与数据库
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

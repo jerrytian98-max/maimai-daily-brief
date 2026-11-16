@@ -1,0 +1,31 @@
+{
+  "circle": {
+    "webcid": "在这里填同事圈的 webcid",
+    "name": "XX同事圈"
+  },
+  "fetch": {
+    "pages": 30,
+    "max_comment_posts": 0,
+    "max_pages": 8,
+    "sleep": 0.3
+  },
+  "brief": {
+    "hours": 24,
+    "top": 5,
+    "show_meta": false
+  },
+  "llm": {
+    "enabled": true,
+    "base_url": "https://你的网关地址/v1",
+    "model": "你的模型名",
+    "api_key_env": "MAIMAI_LLM_API_KEY",
+    "reasoning_effort": "no_think",
+    "timeout": 180
+  },
+  "push": {
+    "enabled": false,
+    "type": "wecom",
+    "webhook": "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=在这里填群机器人key",
+    "webhook_env": "MAIMAI_WECOM_WEBHOOK"
+  }
+}
