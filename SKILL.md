@@ -109,7 +109,6 @@ export MAIMAI_COOKIES='{"u":"123456","access_token":"...","csrftoken":"..."}'
 > 有 `csrftoken` 才能走 web 接口（没有的话会走 App 网关兜底）。
 
 ### 步骤 4：配置
-
 复制 `config.example.json` 为 `config.json`，填这几项：
 
 ```jsonc
@@ -290,6 +289,48 @@ python scripts/run_daily.py --no-llm
 `urllib` 默认走环境代理，企业微信 API 走代理会失败。
 显式 `build_opener(ProxyHandler({}))` 空代理直连才通。
 
+**⑬ 最坑的一个：cookie 在磁盘上是「滞后」的**
+
+这个坑让日报静默断更了 3 天才被发现。
+
+现象：
+- 浏览器里脉脉一切正常，能看到同事圈
+- 从 Chrome 的 Cookies 库导出，`access_token` 要么缺失、要么是旧的
+- 脚本用导出的 cookie 打接口，一直 `error_code 20001 Invalid login user`
+- 但浏览器的同一份登录态明明是好的
+
+根因：**Chromium 的 cookie 有两份状态**
+- 内存态：真实生效的 token
+- 磁盘态：定期批量刷盘，可能是几分钟前甚至几天前的旧值
+
+服务端会作废旧 token，于是「内存里有新的、磁盘里是旧的」——
+你看着正常，脚本却一直失败。
+
+解法不是「多导几次」，而是**让浏览器自己把内存态交出来**：
+
+```python
+# 复制 profile（避开正在使用的 Chrome），用它启动
+ctx = chromium.launch_persistent_context(cloned_profile)
+page.goto("https://maimai.cn/company/gossip_discuss?webcid=...")
+cookies = ctx.cookies()      # ← 这里读的是内存态，权威
+```
+
+`scripts/ensure_login.py` 实现了三步：
+1. **预检**：用现有 cookie 打 `count=1`，通过就结束（绝大多数日子走这条，0 成本）
+2. **自愈**：失败则复制 profile → 开浏览器 → 跑一次页面 → 从 `ctx.cookies()` 取内存态
+3. **复验**：还不行才判定真失效，交回人工
+
+复制 profile 而不是直接用，是因为 Chrome 的 profile 不能被两个实例同时占用，
+而用户可能正开着 Chrome 干活。
+
+**⑭ 失败不能静默**
+
+空数据保护（不推「新帖 0」的假日报）是对的，
+但如果连告警都没有，断更就会持续 —— 用户以为「最近很安静」。
+
+现在改成：抓不到数据时**不推日报，但推一条简短故障告警**，
+明确说「这不是今天没内容，是没拿到数据」。
+
 ---
 
 ## 六、文件说明
@@ -304,12 +345,13 @@ maimai-daily-brief/
 ├── scripts/
 │   ├── config.py             # 配置加载 + 路径推导
 │   ├── cookies.py            # 登录态三种来源
-│   ├── chrome_cookies.py     # 从 Chrome 导出 cookie
+│   ├── chrome_cookies.py     # 从 Chrome 磁盘库导出 cookie
+│   ├── ensure_login.py       # ★ 预检 + 浏览器自愈（解决 token 滞后）
 │   ├── maimai_client.py      # 抓取：feed / 评论 / 楼中楼 / 增量
 │   ├── brief.py              # 打分 + 结论识别 + 渲染
 │   ├── summarize.py          # 模型改写（可选，带兜底）
 │   ├── push_wecom.py         # 企业微信推送
-│   └── run_daily.py          # 一键：抓取→出报→推送
+│   └── run_daily.py          # 一键：登录检查→抓取→出报→推送
 └── docs/
     └── architecture.md       # 接口细节与数据模型
 ```

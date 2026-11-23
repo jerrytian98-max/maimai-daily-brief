@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """集中管理配置：路径、同事圈、模型、推送。
 
@@ -46,7 +46,7 @@ DEFAULTS = {
         # 任何 OpenAI Chat Completions 兼容端点都可以
         "base_url": "",
         "model": "",
-        "api_key_env": "TOKENLINK_API_KEY",
+        "api_key_env": "MAIMAI_LLM_API_KEY",
         # 思考型模型务必用 no_think：否则 reasoning 会吃光 token 预算
         "reasoning_effort": "no_think",
         "timeout": 180,

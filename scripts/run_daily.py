@@ -36,6 +36,7 @@ from config import ROOT, load as load_cfg, ensure_dirs  # noqa: E402
 CLIENT = os.path.join(HERE, "maimai_client.py")
 BRIEF = os.path.join(HERE, "brief.py")
 PUSH = os.path.join(HERE, "push_wecom.py")
+ENSURE_LOGIN = os.path.join(HERE, "ensure_login.py")
 
 
 def pick_python() -> str:
@@ -72,10 +73,11 @@ def pick_python() -> str:
 PY = pick_python()
 
 
-def run(cmd, timeout=1800):
+def run(cmd, timeout=1800, stdin=None):
     """跑子进程，返回 (rc, stdout+stderr)。不用 shell，避免引号问题。"""
     try:
         p = subprocess.run(cmd, capture_output=True, timeout=timeout, cwd=ROOT,
+                           input=(stdin.encode("utf-8") if stdin else None),
                            env={**os.environ, "PYTHONIOENCODING": "utf-8"})
         out = (p.stdout or b"").decode("utf-8", "replace")
         err = (p.stderr or b"").decode("utf-8", "replace")
@@ -131,6 +133,10 @@ def main() -> int:
     ap.add_argument("--push", action="store_true", help="生成后推送到企业微信")
     ap.add_argument("--meta", action="store_true", help="附带排序依据")
     ap.add_argument("--no-llm", action="store_true", help="跳过模型改写")
+    ap.add_argument("--skip-login-check", action="store_true",
+                    help="跳过登录态预检与自愈（已知有效时省时间）")
+    ap.add_argument("--no-alert", action="store_true",
+                    help="抓取失败时不推故障告警")
     args = ap.parse_args()
 
     ensure_dirs()
@@ -151,6 +157,26 @@ def main() -> int:
         note = "本次未抓取，仅用已有数据出报"
         print("  跳过抓取")
     else:
+        # 登录态保障：预检 → 磁盘重导 → 浏览器自愈。
+        # 磁盘 cookie 可能滞后（浏览器内存里换了新 token 却还没刷盘），
+        # 这一步专门治那个 —— 见 ensure_login.py 顶部说明。
+        if not args.skip_login_check:
+            print("  检查登录态…")
+            lrc, lout = run([PY, "-X", "utf8", ENSURE_LOGIN,
+                             "--webcid", cfg["circle"]["webcid"]], timeout=900)
+            for line in reversed(lout.strip().splitlines()):
+                line = line.strip()
+                if line.startswith("{") and '"action"' in line:
+                    try:
+                        info = json.loads(line)
+                        print("    登录态：%s（%s）" % (info.get("action"),
+                                                      info.get("detail", "")))
+                        if not info.get("ok"):
+                            note = "登录态失效且自动恢复失败，以下基于历史数据"
+                    except Exception:  # noqa: BLE001
+                        pass
+                    break
+
         rc, stats, out = sync(cfg)
         if stats:
             print("  抓取：帖子 %d 条（新 %d）｜ 新跟帖 %d 条" % (
@@ -176,6 +202,22 @@ def main() -> int:
         open(path, "w", encoding="utf-8").write(md)
 
     print("  → %s（%d 字节）" % (path, len(md.encode("utf-8"))))
+
+    # 空数据保护：抓不到数据时不要推一份「新帖 0」的假日报，
+    # 但也**不能完全静默**（那样断了都没人知道）。改推一条故障告警。
+    if note and "新帖 **0**" in md:
+        print("  ⛔ 抓取失败且窗口内无新数据，不推日报。")
+        if args.push and not args.no_alert and cfg.get("push", {}).get("enabled"):
+            alert = ("## ⚠️ 同事圈日报抓取失败\n"
+                     "> %s\n\n"
+                     "**这不是「今天没内容」，是没拿到数据。**\n"
+                     "处理：浏览器打开 https://maimai.cn 重新登录一次，"
+                     "再跑 `python scripts/run_daily.py --push`。\n\n"
+                     "自动恢复已尝试（预检 → 磁盘重导 → 浏览器自愈），均失败。" % note)
+            arc, aout = run([PY, "-X", "utf8", PUSH, "-", "--markdown"],
+                            timeout=120, stdin=alert)
+            print("  告警推送：%s" % ("成功" if arc == 0 else "失败 %s" % aout.strip()[:80]))
+        return 3
 
     if args.push:
         if not cfg.get("push", {}).get("enabled"):
