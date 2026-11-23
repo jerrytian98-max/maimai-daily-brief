@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 """每日简报生成器 —— 从库里挑出「有结论、值得看」的内容，写成一份 1 屏日报。
 
 核心判断：**热度 != 值得关注**
@@ -104,11 +104,33 @@ INSULT_RE = re.compile(
     r"无耻|垃圾|傻[逼xX]|智障|滚|去死|恶心|放屁|扯淡|胡说|造谣一张嘴|男男相护")
 
 
+SENT_END = re.compile(r"[。！？；!?;]")
+
+
 def clean_text(t, limit=90):
-    """去掉 [吃惊] 这类表情标记，压成单行。"""
+    """去掉 [吃惊] 这类表情标记，压成单行，并在截断处保持可读。
+
+    直接 `t[:limit]` 会在半个词中间切断（「…天天加班，最」），
+    读者会以为是原文残缺。所以：
+      1. 若句号/问号/分号在 limit 的 60%~100% 之间，就在那里收尾
+      2. 否则硬截到 limit 并补「…」，明确表示还有后文
+    """
     t = re.sub(r"\[[^\]]{1,10}\]", "", t or "")
     t = re.sub(r"\s+", " ", t).strip()
-    return t[:limit]
+    if len(t) <= limit:
+        return t
+
+    window = t[:limit]
+    last = None
+    for m in SENT_END.finditer(window):
+        if m.end() >= int(limit * 0.6):
+            last = m.end()
+    if last:
+        return window[:last] + ("…" if len(t) > last else "")
+    cut = window[: limit - 1].rstrip("，,、 ")
+    if cut and not SENT_END.search(cut[-1]):
+        cut += "…"
+    return cut
 
 
 def key_sentence(t, limit=100) -> str:
@@ -755,7 +777,8 @@ def render_compact(posts, ledger, size, start, end, top=5, meta=False):
     """
     # 标题带上窗口本身：滚动 24h 模式（22:00→22:00）下只写「11-16」
     # 会让人误以为是自然日，所以非整日窗口一律显示起止时间。
-    if start.hour == 0 and end.hour == 0:
+    if (start.hour, start.minute, start.second) == (0, 0, 0) and \
+       (end.hour, end.minute, end.second) == (0, 0, 0):
         span = f"{start:%m-%d}"
     else:
         span = f"{start:%m-%d %H:%M}→{end:%m-%d %H:%M}"
@@ -767,13 +790,17 @@ def render_compact(posts, ledger, size, start, end, top=5, meta=False):
     L += [f"新帖 **{new_cnt}** ｜ 跟帖 **{n_cmts}** ｜ 主线：{' · '.join(themes) or '—'}", ""]
 
     live = [p for p in posts if p["is_new"] or p["new_cmts"] >= 3]
-    # 有结论的才是候选；没有结论的直接淘汰，不进任何小节
-    with_concl = [p for p in live if p.get("_concl")]
+    # 「今日精选」只从**今天新发**的帖里选。
+    # 之前把「老帖今天涨了评论」也算候选，结果连续三天头条是同一批老帖，
+    # 日报变成复读机。回温的老帖归到下方单独小节。
+    fresh = [p for p in live if p["is_new"]]
+    with_concl = [p for p in fresh if p.get("_concl")]
+    revived = [p for p in live if not p["is_new"] and p.get("_concl")]
     picked_ids = set()
 
     L += ["## 今日精选", ""]
     if not with_concl:
-        L += ["_今天没有找到「有结论」的消息：全是提问或只有情绪共鸣，评论区没有给出答案。_", ""]
+        L += ["_今天新帖里没有找到「有结论」的消息：全是提问或只有情绪共鸣，评论区没有给出答案。_", ""]
     for i, p in enumerate(with_concl[:3], 1):
         picked_ids.add(p["id"])
         txt, src = p["_concl"]
@@ -783,7 +810,7 @@ def render_compact(posts, ledger, size, start, end, top=5, meta=False):
         L += [f"**{i}. {txt}**{link}", ""]
         # 帖子里如果有背景（问题本身），压成一行放在结论下面。
         # 背景是问句时加「原问」前缀，避免读者把它当成结论的一部分。
-        bg = clean_text(p["text"], 60)
+        bg = clean_text(p["text"], 120)
         if bg and bg not in txt and len(p["text"]) > len(txt) + 10:
             label = "原问" if Q_RE.search(p["text"]) else "背景"
             L += [f"　{label}：{bg}", ""]
@@ -795,14 +822,24 @@ def render_compact(posts, ledger, size, start, end, top=5, meta=False):
                 why.append(f"可信度 {s['cred']}")
             L += [f"　{' · '.join(why)}", ""]
 
-    rest = sorted([p for p in live if p["id"] not in picked_ids and p.get("_concl")],
+    rest = sorted([p for p in fresh if p["id"] not in picked_ids and p.get("_concl")],
                   key=lambda x: -x["_s"]["value"])
     if rest:
         L += ["**要闻**", ""]
         short = {"需要你行动": "行动", "组织与业务动向": "动向", "风险与舆情": "风险"}
         for p in rest[:top]:
             txt, src = p["_concl"]
-            L += [f"- [{short.get(p['_sec'], '其他')}] {txt[:56]}　[原帖]({post_url(p)})"]
+            L += [f"- [{short.get(p['_sec'], '其他')}] {clean_text(txt, 56)}　[原帖]({post_url(p)})"]
+        L += [""]
+
+    # 回温的老帖单独列出：确实在讨论，但不是今天发生的事，
+    # 混进精选会让人误以为是新消息。
+    if revived:
+        revived.sort(key=lambda x: -x["new_cmts"])
+        L += ["**旧帖回温**（今天涨了讨论，非今日新发）", ""]
+        for p in revived[:3]:
+            txt, src = p["_concl"]
+            L += [f"- {clean_text(txt, 50)}（今日 +{p['new_cmts']} 评）　[原帖]({post_url(p)})"]
         L += [""]
 
     bad = [e for e in ledger if e["spread"] >= 10] if ledger else []
