@@ -26,8 +26,8 @@ import urllib.request
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from config import load as load_cfg  # noqa: E402
 
-BASE_DEFAULT = "https://api.deepseek.com/v1"
-MODEL_DEFAULT = "deepseek-flash"
+BASE_DEFAULT = "http://127.0.0.1:8790/v1"
+MODEL_DEFAULT = "deepseek-v4.1-flash"
 
 
 def _cfg() -> dict:
@@ -73,12 +73,26 @@ def _strip_fence(s: str) -> str:
     return (m.group(1) if m else s).strip()
 
 
+def _base() -> str:
+    return (_cfg().get("base_url") or BASE_DEFAULT).rstrip("/")
+
+
+def _is_local(base: str) -> bool:
+    """本地桥接（WorkBuddy 等）不需要 key —— 真实凭据由桥接自己持有。"""
+    b = base.lower()
+    return "127.0.0.1" in b or "localhost" in b
+
+
 def _key() -> str:
     """密钥来自 config.llm.api_key_env 指定的环境变量。
 
-    不硬编码任何具体服务商的变量名 —— 这个 skill 可以接任意
-    OpenAI Chat Completions 兼容端点。
+    本地桥接用固定占位值即可；远端端点则必须配真 key。
+    不硬编码任何具体服务商的变量名 —— 可以接任意 OpenAI 兼容端点。
     """
+    if _is_local(_base()):
+        # 桥接会校验这个值（见 WB_BRIDGE_KEY），不是任意字符串都行
+        return os.environ.get("MAIMAI_BRIDGE_KEY", "wb-local")
+
     name = (_cfg().get("api_key_env") or "").strip()
     if name:
         v = os.environ.get(name)
@@ -139,7 +153,8 @@ def rewrite(cands, timeout=180):
     effort = cfg.get("reasoning_effort") or os.environ.get("MAIMAI_SUMMARY_EFFORT")
     # DeepSeek 官方端点不认识 reasoning_effort（会 422），无论配置里写了什么都要剥掉。
     # 其他兼容端点（混元等思考型模型）才需要它来关掉 reasoning。
-    if "deepseek.com" in base:
+    if ("deepseek.com" in base or "127.0.0.1" in base
+            or "localhost" in base):
         effort = None
     if effort:
         payload["reasoning_effort"] = effort

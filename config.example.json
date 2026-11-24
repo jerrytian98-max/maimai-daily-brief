@@ -1,4 +1,4 @@
-{
+﻿{
   "circle": {
     "webcid": "在这里填同事圈的 webcid",
     "name": "XX同事圈"
@@ -16,9 +16,9 @@
   },
   "llm": {
     "enabled": true,
-    "base_url": "https://你的网关地址/v1",
-    "model": "你的模型名",
-    "api_key_env": "MAIMAI_LLM_API_KEY",
+    "base_url": "http://127.0.0.1:8790/v1",
+    "model": "deepseek-v4.1-flash",
+    "api_key_env": "",
     "reasoning_effort": "no_think",
     "timeout": 180
   },

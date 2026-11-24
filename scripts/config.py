@@ -44,9 +44,9 @@ DEFAULTS = {
     "llm": {
         "enabled": True,
         # 任何 OpenAI Chat Completions 兼容端点都可以
-        "base_url": "",
-        "model": "",
-        "api_key_env": "MAIMAI_LLM_API_KEY",
+        "base_url": "http://127.0.0.1:8790/v1",
+        "model": "deepseek-v4.1-flash",
+        "api_key_env": "",
         # 思考型模型务必用 no_think：否则 reasoning 会吃光 token 预算
         "reasoning_effort": "no_think",
         "timeout": 180,
