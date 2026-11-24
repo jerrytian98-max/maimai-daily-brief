@@ -1,32 +1,24 @@
-#!/usr/bin/env python3
-"""每日简报生成器 —— 从库里挑出「有结论、值得看」的内容，写成一份 1 屏日报。
+﻿#!/usr/bin/env python3
+"""脉脉同事圈 · 每日简报
 
-核心判断：**热度 != 值得关注**
+核心判断：**热度 != 值得关注**。
   最热的帖往往只是情绪共鸣（读完只会焦虑，不改变任何行为）；
   最有用的帖常常只有个位数赞，但写着「我已被沟通，12.30 走」这种第一人称事实。
-
-两条硬规则
-  1. 只输出**有结论**的：纯提问、评论区只有「同问/蹲/插眼」的一律淘汰。
-     宁可当天只出 1 条，也不拿问句凑数。
-  2. 每条附原帖链接，跟在正文同一行末尾。
 
 排序逻辑
   value = 可信度 × (1 + 可行动性 + 0.5 × 影响面) + 增速 + 新颖度
   可信度是**乘数**：一条疯传但无来源的帖不该排第一。
 
-结论识别（三级，可信度从高到低）
-  A 楼主补充：楼主自己在评论区给出结果
-  B 评论区高赞：带硬事实（数字/金额/流程）的高赞跟帖
-  C 楼主自述：第一人称 + 具体时间/金额，且不是提问
-
-  规则负责「筛」，模型负责「写」。规则剪出来常是半句话，
-  所以还会过一次 summarize.py，让模型改写成一两句自洽的结论。
+三种「值得关注」的判据（任一成立即入选）
+  A 亲历信号：第一人称 + 具体日期/组织/金额 —— 事实，不是传闻
+  B 结构信号：同一主题 24h 内被 ≥3 条独立帖提及（交叉印证），或旧帖突然涨评（事情正在发生）
+  C 风险信号：舆情/合规/媒体/删帖
 
 用法
-  python scripts/brief.py                          # 最近 24 小时
-  python scripts/brief.py --date yesterday --write
-  python scripts/brief.py --hours 24 --meta        # 附带排序依据（排查用）
-  python scripts/brief.py --no-llm                 # 跳过模型改写
+  python tools/maimai/brief.py                      # 最近 24 小时
+  python tools/maimai/brief.py --date 2026-11-15     # 某个自然日全天
+  python tools/maimai/brief.py --date yesterday --write
+  python tools/maimai/brief.py --hours 24 --json
 """
 from __future__ import annotations
 
@@ -38,10 +30,11 @@ import os
 import re
 import sys
 
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import maimai_client as watch  # noqa: E402
 import summarize  # noqa: E402
-from config import REPORTS_DIR, DATA_DIR, ensure_dirs  # noqa: E402
+from config import REPORTS_DIR, DATA_DIR  # noqa: E402
 
 OUT_DIR = REPORTS_DIR
 STATE = os.path.join(DATA_DIR, "briefed.json")
@@ -112,7 +105,7 @@ def clean_text(t, limit=90):
 
     直接 `t[:limit]` 会在半个词中间切断（「…天天加班，最」），
     读者会以为是原文残缺。所以：
-      1. 若句号/问号/分号在 limit 的 60%~100% 之间，就在那里收尾
+      1. 若句号/问号/分号在 limit 的 60%~100% 之间，就在那里收尾，不加省略号
       2. 否则硬截到 limit 并补「…」，明确表示还有后文
     """
     t = re.sub(r"\[[^\]]{1,10}\]", "", t or "")
@@ -121,13 +114,16 @@ def clean_text(t, limit=90):
         return t
 
     window = t[:limit]
+    # 找最后一个完整句末；太靠前（<60%）就不值得为它牺牲内容
     last = None
     for m in SENT_END.finditer(window):
         if m.end() >= int(limit * 0.6):
             last = m.end()
     if last:
+        # 断在句末时，只有当后面确实还有内容才需要提示
         return window[:last] + ("…" if len(t) > last else "")
     cut = window[: limit - 1].rstrip("，,、 ")
+    # 已经在句末附近就别补省略号（避免「……。」这种）
     if cut and not SENT_END.search(cut[-1]):
         cut += "…"
     return cut
@@ -199,6 +195,34 @@ def is_conclusive(s: str) -> bool:
     if OPINION_HEAD.match(s) and not re.search(r"\d", s):
         return False
     return True
+
+
+# 生活/社交类内容：可以有结论，但不是工作信息。
+# 「97年 Base深圳 183cm 80kg 申请加v」这种在模型眼里完全符合"有结论"，
+# 但它不该出现在工作日报的精选位。允许降级到回温小节（当舆情温度计）。
+SOCIAL_RE = re.compile(
+    r"(找对象|相亲|征婚|征友|交友|单身|脱单|恋爱|结婚|彩礼|婚房"
+    r"|加v|加V|微信号|微信聊|私聊我"
+    r"|身高\s*\d{3}|体重\s*\d{2}|\d{3}\s*cm|\d{2}\s*kg"
+    r"|爱好是|兴趣是|喜欢比我[高矮胖瘦]|理想对象|理想型"
+    r"|颜值|长得好看|照片|自拍|颜值打分)"
+)
+# 纯勘误/纠错类：有结论但零价值（「楼主承认 ork 打错了，应为 OKR」）
+TRIVIA_RE = re.compile(
+    r"(打错|写错|笔误|错别字|应为|更正|改一下|说错"
+    r"|口误|手滑|拼写|typo)"
+)
+
+
+def is_offtopic(s: str) -> bool:
+    """这条「结论」是否属于工作信息之外的内容。
+
+    模型很擅长判断「有没有答案」，但不擅长判断「值不值得关心」——
+    相亲帖和错别字更正都会被它判为"有结论"。
+    这里补一层内容分类，把它们挡在精选之外。
+    """
+    s = (s or "")
+    return bool(SOCIAL_RE.search(s) or TRIVIA_RE.search(s))
 
 
 def is_joke(s: str) -> bool:
@@ -775,8 +799,8 @@ def render_compact(posts, ledger, size, start, end, top=5, meta=False):
     可信度」这类排序依据，也不显示「已略过 N 条」。理由：这些是给写报告的人看的，
     读者只想知道发生了什么、去哪儿看原帖。要看这些就传 --meta。
     """
-    # 标题带上窗口本身：滚动 24h 模式（22:00→22:00）下只写「11-16」
-    # 会让人误以为是自然日，所以非整日窗口一律显示起止时间。
+    # 标题带上窗口本身：滚动 24h 模式下只写「11-16」会让人误以为是自然日。
+    # 判整日必须同时看时分 —— 00:03→00:03 也是跨天的滚动窗口，不是整日。
     if (start.hour, start.minute, start.second) == (0, 0, 0) and \
        (end.hour, end.minute, end.second) == (0, 0, 0):
         span = f"{start:%m-%d}"
@@ -791,11 +815,16 @@ def render_compact(posts, ledger, size, start, end, top=5, meta=False):
 
     live = [p for p in posts if p["is_new"] or p["new_cmts"] >= 3]
     # 「今日精选」只从**今天新发**的帖里选。
-    # 之前把「老帖今天涨了评论」也算候选，结果连续三天头条是同一批老帖，
-    # 日报变成复读机。回温的老帖归到下方单独小节。
-    fresh = [p for p in live if p["is_new"]]
+    # 之前把「老帖今天涨了评论」也算候选，结果连续三天头条是同一批老帖
+    # （38147149 / 38144653 / 38142023 反复出现），日报变成复读机。
+    # 回温的老帖仍然有价值，但归到下方「回温」小节，不占精选位置。
+    #
+    # 另外排除生活/社交类（相亲帖、错别字勘误）：模型判定它们"有结论"没错，
+    # 但不是工作信息。它们进「回温」当舆情温度计，不占精选位。
+    fresh = [p for p in live if p["is_new"] and not p.get("_offtopic")]
     with_concl = [p for p in fresh if p.get("_concl")]
-    revived = [p for p in live if not p["is_new"] and p.get("_concl")]
+    revived = [p for p in live
+               if (not p["is_new"] or p.get("_offtopic")) and p.get("_concl")]
     picked_ids = set()
 
     L += ["## 今日精选", ""]
@@ -810,6 +839,8 @@ def render_compact(posts, ledger, size, start, end, top=5, meta=False):
         L += [f"**{i}. {txt}**{link}", ""]
         # 帖子里如果有背景（问题本身），压成一行放在结论下面。
         # 背景是问句时加「原问」前缀，避免读者把它当成结论的一部分。
+        # 上限给到 120：60 字常把语境截断成半句话（「…天天加班，最」），
+        # 而结论已经够了，多给几十字上下文比省那一行更值。
         bg = clean_text(p["text"], 120)
         if bg and bg not in txt and len(p["text"]) > len(txt) + 10:
             label = "原问" if Q_RE.search(p["text"]) else "背景"
@@ -832,11 +863,12 @@ def render_compact(posts, ledger, size, start, end, top=5, meta=False):
             L += [f"- [{short.get(p['_sec'], '其他')}] {clean_text(txt, 56)}　[原帖]({post_url(p)})"]
         L += [""]
 
-    # 回温的老帖单独列出：确实在讨论，但不是今天发生的事，
+    # 回温的老帖单独列出：它们确实在讨论，但不是今天发生的事，
     # 混进精选会让人误以为是新消息。
     if revived:
         revived.sort(key=lambda x: -x["new_cmts"])
         L += ["**旧帖回温**（今天涨了讨论，非今日新发）", ""]
+        short = {"需要你行动": "行动", "组织与业务动向": "动向", "风险与舆情": "风险"}
         for p in revived[:3]:
             txt, src = p["_concl"]
             L += [f"- {clean_text(txt, 50)}（今日 +{p['new_cmts']} 评）　[原帖]({post_url(p)})"]
@@ -862,10 +894,10 @@ def render_compact(posts, ledger, size, start, end, top=5, meta=False):
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--hours", type=float, default=None, help="滚动窗口小时数；默认取 config")
+    ap.add_argument("--hours", type=float, default=24)
     ap.add_argument("--date", default=None, help="自然日：today / yesterday / 2026-11-15")
-    ap.add_argument("--top", type=int, default=None, help="要闻条数；默认取 config")
-    ap.add_argument("--webcid", default=None, help="同事圈 id；不传则用 config.json")
+    ap.add_argument("--top", type=int, default=6)
+    ap.add_argument("--webcid", default="167PEUToR")
     ap.add_argument("--write", action="store_true")
     ap.add_argument("--json", action="store_true")
     ap.add_argument("--full", action="store_true", help="详细版（默认是精简版 1 屏）")
@@ -875,13 +907,6 @@ def main() -> int:
                     help="附带排序依据（评论区 N 赞 / 今日 +X 评 / 可信度 / 已略过 N 条）；"
                          "默认不显示，推送内容只要结论和链接")
     args = ap.parse_args()
-
-    # 命令行没给的值一律回落到 config.json，避免脚本里出现任何具体数字/圈 id
-    from config import load as _load
-    _cfg = _load()
-    hours_arg = args.hours if args.hours is not None else _cfg["brief"]["hours"]
-    top_n = args.top if args.top is not None else _cfg["brief"]["top"]
-    meta_flag = args.meta or _cfg["brief"].get("show_meta", False)
 
     now = dt.datetime.now()
     if args.date:
@@ -897,8 +922,8 @@ def main() -> int:
         hours = 24
     else:
         end = now
-        start = end - dt.timedelta(hours=hours_arg)
-        hours = hours_arg
+        start = end - dt.timedelta(hours=args.hours)
+        hours = args.hours
 
     conn = watch.connect()
     posts, n_win_cmts, has_snap = gather(conn, start, end, now)
@@ -925,6 +950,10 @@ def main() -> int:
         # 结论识别：用全量跟帖（不只是窗口内的），否则老帖的答案会看不见
         p["_ans"] = answers.get(p["id"], [])
         p["_concl"] = conclusion(p, p["_ans"])
+        # 生活/勘误类在这里就标好，不能等到模型改写阶段：
+        # 只有分数前 30 的帖会送模型，靠后的（如相亲帖只有 C2）不送，
+        # 只靠模型分支标记会漏判 —— 实测就是 0 命中后才发现这个次序问题。
+        p["_offtopic"] = is_offtopic(p["text"])
 
     posts.sort(key=lambda x: -x["_s"]["value"])
     ledger = claims_ledger(posts)
@@ -940,6 +969,7 @@ def main() -> int:
         llm = summarize.rewrite(cands)
         if llm:
             kept = 0
+            offtopic = 0
             for p in posts:
                 r = llm.get(p["id"])
                 if not r:
@@ -950,13 +980,21 @@ def main() -> int:
                         p["_concl"] = None
                         continue
                     concl = normalize_ratios(r["conclusion"])
+                    # 相亲帖 / 错别字勘误：确实"有结论"，但不是工作信息。
+                    # 注意必须同时看**帖子原文** —— 模型给的结论常把
+                    # 「身高183cm 加v」这类特征词洗掉，只剩「申请认识一下」，
+                    # 只看结论会漏判（实测第一版就是 0 命中）。
+                    if is_offtopic(concl) or is_offtopic(p["text"]):
+                        p["_offtopic"] = True
+                        offtopic += 1
                     src = r["source"] or (p["_concl"][1] if p["_concl"] else "评论区")
                     p["_concl"] = (concl, src)
                     kept += 1
                 else:
                     p["_concl"] = None   # 模型判定「没有明确答案」→ 淘汰
-            print("[brief] 模型改写 %d 条，其中无结论被淘汰 %d 条"
-                  % (kept, sum(1 for x in llm.values() if not x["conclusion"])))
+            print("[brief] 模型改写 %d 条（其中生活/勘误类 %d 条，降级处理），"
+                  "无结论淘汰 %d 条"
+                  % (kept, offtopic, sum(1 for x in llm.values() if not x["conclusion"])))
 
     if args.json:
         out = [{
@@ -967,16 +1005,16 @@ def main() -> int:
             "score": p["_s"], "url": post_url(p),
             "conclusion": ({"text": p["_concl"][0], "source": p["_concl"][1]}
                            if p["_concl"] else None),
-        } for p in posts[: top_n * 6]]
+        } for p in posts[: args.top * 6]]
         print(json.dumps({"window": [str(start), str(end)], "ledger": ledger,
                           "posts": out}, ensure_ascii=False, indent=1))
         conn.close()
         return 0
 
     if args.full:
-        md = render(posts, ledger, size, start, end, hours, top_n, n_win_cmts, has_snap)
+        md = render(posts, ledger, size, start, end, hours, args.top, n_win_cmts, has_snap)
     else:
-        md = render_compact(posts, ledger, size, start, end, top_n, meta_flag)
+        md = render_compact(posts, ledger, size, start, end, args.top, args.meta)
     print(md)
 
     if args.write:
